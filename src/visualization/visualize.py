@@ -5,12 +5,18 @@ import pandas as pd
 import plotly.graph_objs as go
 import numpy as np
 import os
+import json
 from datetime import datetime, timedelta
 import requests        
-from datetime import datetime , timedelta
-from dash.dependencies import Output , Input
-import plotly.graph_objects as go       
+from dash.dependencies import Output , Input      
 from plotly.subplots import make_subplots 
+from plotly.graph_objs import *
+from datetime import datetime as dt
+import plotly.express as px
+from scipy.integrate import odeint
+from scipy.optimize import minimize,curve_fit
+from flask import send_from_directory
+global glob_data, beta, gamma
 
 ts_cases_path = "../../data/processed/time_series_covid19_confirmed_global.csv"
 ts_deaths_path = "../../data/processed/time_series_covid19_deaths_global.csv"
@@ -20,18 +26,120 @@ ts_recovery_path = "../../data/processed/time_series_covid19_recovered_global.cs
 
 
 print(os.getcwd())
-df_input_large=pd.read_csv('../../data/processed/COVID_final_set.csv',sep=';')
+df_input_large=pd.read_csv('../../data/processed/processed/COVID_final_set.csv',sep=';')
 fig = go.Figure()
+
+
+beta=0.4   
+gamma=0.1
+
+def get_data():
+    data_table = []
+    url="https://corona.lmao.ninja/v2/countries?yesterday&sort"
+    data= requests.get(url)
+    data=json.loads(data.text)
+    for item in data:
+        data_table.append([item['countryInfo']['iso3'],item['country'],item['cases'],item['recovered'],item['active'],item['deaths'],item['critical'], item['population']])
+    data = pd.DataFrame(data_table,columns = ['Code','Country', 'Confirmed', 'Recovered', 'Active', 'Deaths','Critical', 'Population'])
+    data = data.sort_values(by = 'Confirmed', ascending=False)
+    return data
+
+def get_country_data(country):
+
+    till_date_data=[]
+
+    url=f"https://api.covid19api.com/total/country/{country}"
+    requested_data= requests.get(url)
+    requested_data=json.loads(requested_data.text)
+
+    for each in requested_data:
+        till_date_data.append([each['Date'][:10],each['Confirmed'],each['Recovered'],each['Active'],each['Deaths']])
+
+    country_data = pd.DataFrame(till_date_data,columns = ['Date','Confirmed', 'Recovered', 'Active', 'Deaths',])
+
+    data = country_data[['Confirmed','Recovered','Deaths']]
+    unrepaired_data= data - data.shift(1)
+
+    false_index_deaths = list(unrepaired_data.index[unrepaired_data['Deaths'] < 0])
+
+    if false_index_deaths != None :
+        for each in false_index_deaths:
+            data.at[each,'Deaths'] = data.at[each-1,'Deaths']
+
+    false_index_confirmed = list(unrepaired_data.index[unrepaired_data['Confirmed'] < 0])
+
+    if false_index_confirmed != None :
+        for each in false_index_confirmed:
+            data.at[each,'Confirmed'] = data.at[each-1,'Confirmed']
+
+
+    false_index_recovered = list(unrepaired_data.index[unrepaired_data['Recovered'] < 0])
+
+    if false_index_recovered != None :
+        for each in false_index_recovered:
+            data.at[each,'Recovered'] = data.at[each-1,'Recovered']
+
+    daily_data = data - data.shift(1)
+    daily_data = daily_data.fillna(0)
+    daily_data = daily_data.mask(daily_data < 0, 0)
+
+    new_data = pd.concat([country_data[['Date']],data,daily_data], axis=1, sort=False)
+    new_data.columns = ['Date', 'Total_confirmed', 'Total_recovered', 'Total_deaths', 'Daily_confirmed','Daily_recovered', 'Daily_deaths']
+
+    return new_data
+
+
+def collected_data(data, country_code = 'DEU'):
+    
+    if country_code == 'KOR':
+        return 'KOR'
+        
+    if country_code != "USA":
+        data = np.array(data[['Code','Country']])
+
+        for records in data:
+            if records[0] == country_code:
+                break
+
+        return records[1]
+
+    if country_code == 'USA':
+        return 'United States'
+        
+#to fetch the total world stats
+def total_status():
+
+    url = 'https://api.covid19api.com/world/total'
+    data = requests.get(url)
+    total_data = json.loads(data.text)
+
+    total_confirmed = f'{total_data["TotalConfirmed"]:,}'
+    total_deaths = f"{total_data['TotalDeaths']:,}"
+    total_recovered = f"{total_data['TotalRecovered']:,}"
+    total_active = total_data["TotalConfirmed"] -total_data['TotalDeaths'] - total_data['TotalRecovered']
+    total_active = f"{total_active:,}"
+
+    return total_confirmed,total_recovered,total_active,total_deaths
+
+glob_data = get_data()
+glob_data = glob_data.dropna()
+comparision_countries_list = glob_data.sort_values('Confirmed',ascending = False)
+comparision_countries_list = comparision_countries_list[0:187]
+sir_simulation_countries_list = comparision_countries_list[0:187]
+confirmed, recovered, active, deaths = total_status()
+
+
+
 
 def prepare_daily_report():
     
 
     current_date = (datetime.today() - timedelta(days=1)).strftime('%m-%d-%Y')
-    if (os.path.isfile('../../data/raw/COVID-19/csse_covid_19_data/csse_covid_19_daily_reports/' + current_date + '.csv')):
-        df = pd.read_csv('../../data/raw/COVID-19/csse_covid_19_data/csse_covid_19_daily_reports/' + current_date + '.csv')
+    if (os.path.isfile('coviddashboard/data/raw/COVID-19/csse_covid_19_data/csse_covid_19_daily_reports/' + current_date + '.csv')):
+        df = pd.read_csv('coviddashboard/data/raw/COVID-19/csse_covid_19_data/csse_covid_19_daily_reports/' + current_date + '.csv')
     else:
         current_date = (datetime.today() - timedelta(days=2)).strftime('%m-%d-%Y')
-        df = pd.read_csv('../../data/raw/COVID-19/csse_covid_19_data/csse_covid_19_daily_reports/' + current_date + '.csv')
+        df = pd.read_csv('coviddashboard/data/raw/COVID-19/csse_covid_19_data/csse_covid_19_daily_reports/' + current_date + '.csv')
     
     df_country = df.groupby(['Country_Region']).sum().reset_index()
     df_country.replace('US', 'United States', inplace=True)
@@ -207,11 +315,39 @@ app.layout = html.Div([
         ] ,style = {'float':'right','margin':'auto','width':'35%','backgroundColor':"#edf5e1",'border': '5px solid #05386b'},
             className = 'row'),
             ],style = {'backgroundColor':'#7395AE'},  className = 'row'),
+    
+    
+    
             
+    html.Div([   
+    html.Div('SIR SIMULATIONS',style = {'textAlign':'center',
+    'backgroundColor': '#edf5e1',
+    'font-size': '23px',
+    'textTransform': 'uppercase',
+    'lineHeight': '40px',
+    'display' : 'block',
+    'font-weight': 'bold','color':'#05386b'}),
+
+    html.Div([
+            dcc.Dropdown(id = 'simulation_countries',
+        options=[{'label': country_name, 'value': country_code} for country_name,country_code in zip(sir_simulation_countries_list["Country"],sir_simulation_countries_list["Code"]) ],
+        value="DEU",
+    )
+        ]),
+
+    html.Div([
+        dcc.Graph(id = "SIR_simulations")
+   ])],style={'backgroundColor' : "#edf5e1", "text-align": "center","display": "inline-block",'border': '5px solid #05386b','margin-top':'50', 'width':'100%'},
+       
+    ),    
+
+   
     
 
    
-]
+],
+    
+    
   )
 
 
@@ -229,13 +365,16 @@ app.layout = html.Div([
      dash.dependencies.Output('fig_6' , 'figure'),
      dash.dependencies.Output('fig_7' , 'figure'),
      dash.dependencies.Output('fig_8' , 'figure'),
-     dash.dependencies.Output('table_data' , 'children')],
+     dash.dependencies.Output('table_data' , 'children'),
+     dash.dependencies.Output('SIR_simulations','figure')
+     ],
     [dash.dependencies.Input("value-selected", "value"),
      dash.dependencies.Input('country_drop_down', 'value'),
     dash.dependencies.Input('doubling_time', 'value'),
-    dash.dependencies.Input('fig_2_update' , 'n_intervals')]
+    dash.dependencies.Input('fig_2_update' , 'n_intervals'),
+    dash.dependencies.Input('simulation_countries', 'value')]
 )
-def update_figure(selected,country_list,show_doubling,n):
+def update_figure(selected,country_list,show_doubling,n,value):
     #dff = prepare_confirmed_data()
 
     dff = prepare_daily_report()
@@ -522,7 +661,7 @@ def update_figure(selected,country_list,show_doubling,n):
             marker = dict(color = 'LightGreen')
         )
     )
-    fig_7.update_layout(title='<b>TOTAL RECOVERIES IN 10 WORST <br>AFFECTED COUNTRIES<</b>' ,paper_bgcolor ="#edf5e1" , plot_bgcolor="#edf5e1" , font = dict(color = '#05386b') ,legend_orientation='h', legend = dict(x = 0.1 , y = 0.05))
+    fig_7.update_layout(title='<b>TOTAL RECOVERIES IN 10 WORST <br>AFFECTED COUNTRIES</b>' ,paper_bgcolor ="#edf5e1" , plot_bgcolor="#edf5e1" , font = dict(color = '#05386b') ,legend_orientation='h', legend = dict(x = 0.1 , y = 0.05))
     fig_7.update_xaxes(showgrid = False , zeroline = False ,showline=False)
     fig_7.update_yaxes(showgrid = False , zeroline = False , showline = False)
 
@@ -537,7 +676,7 @@ def update_figure(selected,country_list,show_doubling,n):
             marker = dict(color = '#eb3131')
         )
     )
-    fig_8.update_layout(title = '<b>TOTAL DEATHS IN 10 WORST <br>AFFECTED COUNTRIES<</b>' ,paper_bgcolor ="#edf5e1" , plot_bgcolor="#edf5e1" , font = dict(color = '#05386b') ,legend_orientation='h', legend = dict(x = 0.1 , y = -0.05))
+    fig_8.update_layout(title = '<b>TOTAL DEATHS IN 10 WORST <br>AFFECTED COUNTRIES</b>' ,paper_bgcolor ="#edf5e1" , plot_bgcolor="#edf5e1" , font = dict(color = '#05386b') ,legend_orientation='h', legend = dict(x = 0.1 , y = -0.05))
     fig_8.update_xaxes(showgrid = False , zeroline = False ,showline=False)
     fig_8.update_yaxes(showgrid = False , zeroline = False , showline = False)
 
@@ -563,7 +702,74 @@ def update_figure(selected,country_list,show_doubling,n):
     
     
     
+    #############################################3
+    country = collected_data(glob_data,value)
+    data = get_country_data(country)
+    data_size = 8
+    t = np.arange(data_size)
+    N = glob_data[glob_data['Code'] == value]['Population'].values[0]
+
+    def SIR(y, t, beta, gamma):
+        S = y[0]
+        I = y[1]
+        R = y[2]
+        return -beta*S*I/N, (beta*S*I)/N-(gamma*I), gamma*I
+   # print(t,beta, gamma)
+
+    def fit_odeint(t,beta, gamma):
+        return odeint(SIR,(s_0,i_0,r_0), t, args = (beta,gamma))[:,1]
+
+    def loss(point, data, s_0, i_0, r_0):
+        predict = fit_odeint(t, *point)
+        l1 = np.sqrt(np.mean((predict - data)**2))
+        return l1
+
+    predicted_simulations = []
+
+    for i in range(len(data)-data_size):
+        if i%data_size == 0:
+            j = i
+            train = list(data['Total_confirmed'][i:i+data_size])
+            i_0 = train[0]
+            r_0 = data ['Total_recovered'].values[i]
+            s_0 = N - i_0 - r_0
+            params, cerr = curve_fit(fit_odeint,t, train)
+            optimal = minimize(loss, params, args=(train, s_0, i_0, r_0))
+            beta,gamma = optimal.x
+            predict = list(fit_odeint(t,beta,gamma))
+            predicted_simulations.extend(predict)
+
+    train = list(data['Total_confirmed'][-data_size:])
+    i_0 = train[0]
+    r_0 = data ['Total_recovered'].values[-data_size]
+    s_0 = N - i_0 - r_0
+    params, cerr = curve_fit(fit_odeint, t, train)
+    optimal = minimize(loss, params, args=(train, s_0, i_0, r_0))
+    beta,gamma = optimal.x
+    predict = list(fit_odeint(np.arange(data_size + 7), beta, gamma))
+    predicted_simulations.extend(predict[j-i-8:])
     
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=data["Date"], y=data['Total_confirmed'],
+                        mode='lines+markers',
+                        name='Actual'))
+    
+    ## insert extra dates here
+    dates = data["Date"].values.tolist()
+    last_date = datetime.strptime(dates[-1], "%Y-%m-%d")
+    for _ in range (7):
+        last_date += timedelta(days=1)
+        dates.append(last_date.strftime("%Y-%m-%d"))
+    
+    fig.add_bar(x = dates[:len(predicted_simulations)], y=predicted_simulations, name = "Simulated")    
+    fig.update_layout(height = 700,
+                      paper_bgcolor ="#edf5e1" , 
+                        plot_bgcolor="#edf5e1" , 
+                        font = dict(color = '#05386b'))
+    
+    
+    
+    ################
     
     
     
@@ -598,7 +804,9 @@ def update_figure(selected,country_list,show_doubling,n):
             fig_6 ,
             fig_7 ,
             fig_8 ,
-            table
+            table,
+            fig
+          
     ]
 
 if __name__ == '__main__':
